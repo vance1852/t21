@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import io
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Optional
@@ -31,7 +33,39 @@ from .recommend import recommend_keep, recommend_maintain
 from .export import export_report, create_backup, restore_backup
 
 
-console = Console()
+def _fix_terminal_encoding() -> None:
+    """修复Windows终端编码问题（延迟执行，避免干扰pytest等测试框架）"""
+    if sys.platform != "win32":
+        return
+    try:
+        if hasattr(sys.stdout, "isatty") and sys.stdout.isatty():
+            if hasattr(sys.stdout, "buffer"):
+                sys.stdout = io.TextIOWrapper(
+                    sys.stdout.buffer, encoding="utf-8", errors="replace"
+                )
+        if hasattr(sys.stderr, "isatty") and sys.stderr.isatty():
+            if hasattr(sys.stderr, "buffer"):
+                sys.stderr = io.TextIOWrapper(
+                    sys.stderr.buffer, encoding="utf-8", errors="replace"
+                )
+    except Exception:
+        pass
+
+
+def _make_console() -> Console:
+    """创建Console实例，适配Windows终端"""
+    kwargs: dict = {"highlight": False, "emoji": False, "force_interactive": False}
+    if sys.platform == "win32":
+        kwargs["color_system"] = "windows"
+    try:
+        return Console(**kwargs)
+    except Exception:
+        kwargs["force_terminal"] = False
+        kwargs["color_system"] = None
+        return Console(**kwargs)
+
+
+console = _make_console()
 
 
 def _load_config(workspace: str) -> Config:
@@ -53,6 +87,13 @@ def _get_db(workspace: str, config: Config) -> DatabaseManager:
 def _output_json(data: dict) -> None:
     """输出JSON格式"""
     click.echo(json.dumps(data, ensure_ascii=False, indent=2))
+
+
+def _is_json_output(ctx: click.Context, local_json: bool = False) -> bool:
+    """判断是否需要JSON输出，优先使用子命令参数，否则使用全局参数"""
+    if local_json:
+        return True
+    return bool(ctx.obj.get("json_output", False))
 
 
 def _severity_color(severity: str) -> str:
@@ -90,6 +131,7 @@ def _risk_level_color(level: str) -> str:
 @click.pass_context
 def main(ctx: click.Context, workspace: str, json_output: bool) -> None:
     """Ocean Sentinel - 近海浮标与水下传感器数据质量审计及覆盖率分析工具"""
+    _fix_terminal_encoding()
     ctx.ensure_object(dict)
     ctx.obj["workspace"] = str(Path(workspace).resolve())
     ctx.obj["json_output"] = json_output
@@ -98,11 +140,12 @@ def main(ctx: click.Context, workspace: str, json_output: bool) -> None:
 @main.command()
 @click.argument("workspace_path", type=click.Path(), default=".")
 @click.option("--force", "-f", is_flag=True, help="强制覆盖已有文件")
+@click.option("--json", "json_output_local", is_flag=True, help="以JSON格式输出结果")
 @click.pass_context
-def init(ctx: click.Context, workspace_path: str, force: bool) -> None:
+def init(ctx: click.Context, workspace_path: str, force: bool, json_output_local: bool) -> None:
     """初始化示例工作区"""
     path = Path(workspace_path).resolve()
-    json_output = ctx.obj["json_output"]
+    json_output = _is_json_output(ctx, json_output_local)
 
     config_path = path / "config.yaml"
     if config_path.exists() and not force:
@@ -130,7 +173,7 @@ def init(ctx: click.Context, workspace_path: str, force: bool) -> None:
                 f"观测站: {result.get('stats', {}).get('stations', 0)} 个\n"
                 f"传感器: {result.get('stats', {}).get('sensors', 0)} 个\n\n"
                 f"已创建 {len(result.get('created_files', []))} 个文件",
-                title="🌊 Ocean Sentinel",
+                title="[Ocean Sentinel]",
                 border_style="blue",
             ))
     except Exception as e:
@@ -144,11 +187,12 @@ def init(ctx: click.Context, workspace_path: str, force: bool) -> None:
 @main.command()
 @click.argument("files", nargs=-1, type=click.Path(exists=True))
 @click.option("--sensor", "-s", help="指定传感器ID（用于元数据文件）")
+@click.option("--json", "json_output_local", is_flag=True, help="以JSON格式输出结果")
 @click.pass_context
-def ingest(ctx: click.Context, files: tuple[str, ...], sensor: Optional[str]) -> None:
+def ingest(ctx: click.Context, files: tuple[str, ...], sensor: Optional[str], json_output_local: bool) -> None:
     """导入观测数据文件"""
     workspace = ctx.obj["workspace"]
-    json_output = ctx.obj["json_output"]
+    json_output = _is_json_output(ctx, json_output_local)
 
     if not files:
         if json_output:
@@ -233,11 +277,12 @@ def ingest(ctx: click.Context, files: tuple[str, ...], sensor: Optional[str]) ->
 @click.option("--start", help="开始时间 (ISO格式)")
 @click.option("--end", help="结束时间 (ISO格式)")
 @click.option("--daily", is_flag=True, help="显示按天汇总")
+@click.option("--json", "json_output_local", is_flag=True, help="以JSON格式输出结果")
 @click.pass_context
-def audit(ctx: click.Context, sensor: Optional[str], start: Optional[str], end: Optional[str], daily: bool) -> None:
+def audit(ctx: click.Context, sensor: Optional[str], start: Optional[str], end: Optional[str], daily: bool, json_output_local: bool) -> None:
     """执行数据质量审计"""
     workspace = ctx.obj["workspace"]
-    json_output = ctx.obj["json_output"]
+    json_output = _is_json_output(ctx, json_output_local)
 
     try:
         config = _load_config(workspace)
@@ -276,7 +321,7 @@ def _print_audit_result(result, daily: bool) -> None:
         f"漂移次数: [yellow]{len(result.drifts)}[/yellow]\n"
         f"越界值: [red]{len(result.out_of_range)}[/red]\n"
         f"时钟偏移: [yellow]{len(result.clock_offsets)}[/yellow]",
-        title="📊 数据质量审计报告",
+        title="[数据质量审计报告]",
         border_style="blue",
     ))
 
@@ -344,11 +389,12 @@ def _print_audit_result(result, daily: bool) -> None:
 @click.option("--start", help="开始时间")
 @click.option("--end", help="结束时间")
 @click.option("--detail", "-d", is_flag=True, help="显示详细信息")
+@click.option("--json", "json_output_local", is_flag=True, help="以JSON格式输出结果")
 @click.pass_context
-def coverage(ctx: click.Context, grid: Optional[str], start: Optional[str], end: Optional[str], detail: bool) -> None:
+def coverage(ctx: click.Context, grid: Optional[str], start: Optional[str], end: Optional[str], detail: bool, json_output_local: bool) -> None:
     """计算覆盖率"""
     workspace = ctx.obj["workspace"]
-    json_output = ctx.obj["json_output"]
+    json_output = _is_json_output(ctx, json_output_local)
 
     try:
         config = _load_config(workspace)
@@ -384,7 +430,7 @@ def _print_coverage_result(result, detail: bool, grid_filter: Optional[str]) -> 
         f"整体覆盖率: [bold]{result.overall_ratio:.1%}[/bold]\n"
         f"风险等级: [{color}] {result.overall_level}[/{color}]\n"
         f"不达标网格: [red]{len(result.under_min)}[/red] 个",
-        title="📈 覆盖率报告",
+        title="[覆盖率报告]",
         border_style="blue",
     ))
 
@@ -407,7 +453,7 @@ def _print_coverage_result(result, detail: bool, grid_filter: Optional[str]) -> 
             grid_id,
             f"{grid_info['coverage_ratio']:.1%}",
             f"[{color}]{grid_info['risk_level']}[/{color}]",
-            "[green]✓[/green]" if grid_info["meets_minimum"] else "[red]✗[/red]",
+            "[green]Y[/green]" if grid_info["meets_minimum"] else "[red]N[/red]",
             str(grid_info["total_variables_covered"]),
         )
     console.print(table)
@@ -437,12 +483,13 @@ def _print_coverage_result(result, detail: bool, grid_filter: Optional[str]) -> 
 @click.option("--start", help="开始时间")
 @click.option("--end", help="结束时间")
 @click.option("--list", "list_items", is_flag=True, help="列出所有方案/窗口")
+@click.option("--json", "json_output_local", is_flag=True, help="以JSON格式输出结果")
 @click.pass_context
 def simulate(ctx: click.Context, plan: Optional[str], window_id: Optional[str], sensors: Optional[str],
-             start: Optional[str], end: Optional[str], list_items: bool) -> None:
+             start: Optional[str], end: Optional[str], list_items: bool, json_output_local: bool) -> None:
     """模拟撤收或维护的影响"""
     workspace = ctx.obj["workspace"]
-    json_output = ctx.obj["json_output"]
+    json_output = _is_json_output(ctx, json_output_local)
 
     try:
         config = _load_config(workspace)
@@ -558,7 +605,7 @@ def _print_simulation_result(result) -> None:
         f"受影响网格: [yellow]{len(result.impacted_grids)}[/yellow] 个\n"
         f"新增不达标: [red]{len(result.newly_under_min)}[/red] 个\n"
         f"风险等级下降: [red]{len(result.risk_level_downgrades)}[/red] 个",
-        title="🎯 撤收模拟结果",
+        title="[撤收模拟结果]",
         border_style="blue",
     ))
 
@@ -575,9 +622,9 @@ def _print_simulation_result(result) -> None:
         for grid in sorted(result.impacted_grids, key=lambda x: x["ratio_change"]):
             diff = grid["ratio_change"]
             diff_color = "green" if diff > 0 else "red"
-            base_meet = "[green]✓[/green]" if grid["baseline_meets_min"] else "[red]✗[/red]"
-            sim_meet = "[green]✓[/green]" if grid["simulated_meets_min"] else "[red]✗[/red]"
-            level_change = "↓" if grid["level_downgraded"] else "-"
+            base_meet = "[green]Y[/green]" if grid["baseline_meets_min"] else "[red]N[/red]"
+            sim_meet = "[green]Y[/green]" if grid["simulated_meets_min"] else "[red]N[/red]"
+            level_change = "DOWN" if grid["level_downgraded"] else "-"
 
             table.add_row(
                 grid["grid_id"],
@@ -616,12 +663,13 @@ def _print_simulation_result(result) -> None:
 @click.option("--min-coverage", type=float, help="最低覆盖率要求")
 @click.option("--max-cost", type=float, help="最大维护成本")
 @click.option("--count", type=int, help="推荐数量")
+@click.option("--json", "json_output_local", is_flag=True, help="以JSON格式输出结果")
 @click.pass_context
 def recommend(ctx: click.Context, mode: str, max_sensors: Optional[int], min_coverage: Optional[float],
-              max_cost: Optional[float], count: Optional[int]) -> None:
+              max_cost: Optional[float], count: Optional[int], json_output_local: bool) -> None:
     """推荐传感器保留或检修优先级"""
     workspace = ctx.obj["workspace"]
-    json_output = ctx.obj["json_output"]
+    json_output = _is_json_output(ctx, json_output_local)
 
     try:
         config = _load_config(workspace)
@@ -664,7 +712,7 @@ def _print_recommendation_result(result, mode: str) -> None:
             f"建议撤收: [yellow]{result.remove_count}[/yellow] 个\n"
             f"预期覆盖率: {result.expected_coverage:.1%}\n"
             f"总维护成本: {result.total_maintenance_cost:.2f}",
-            title="💡 传感器保留推荐",
+            title="[传感器保留推荐]",
             border_style="blue",
         ))
 
@@ -712,7 +760,7 @@ def _print_recommendation_result(result, mode: str) -> None:
             f"策略: [bold]{result.strategy}[/bold]\n"
             f"总传感器: {result.total_sensors} 个\n"
             f"优先检修: [yellow]{len(result.maintain_first)}[/yellow] 个",
-            title="🔧 检修优先级推荐",
+            title="[检修优先级推荐]",
             border_style="blue",
         ))
 
@@ -750,13 +798,14 @@ def _print_recommendation_result(result, mode: str) -> None:
 @click.option("--no-data", is_flag=True, help="备份时不包含观测数据")
 @click.option("--restore", is_flag=True, help="从备份恢复")
 @click.option("--overwrite", is_flag=True, help="恢复时覆盖现有文件")
+@click.option("--json", "json_output_local", is_flag=True, help="以JSON格式输出结果")
 @click.pass_context
 def export(ctx: click.Context, output: str, fmt: str, include_audit: bool, include_coverage: bool,
            include_simulation: bool, include_recommendation: bool, plan: Optional[str],
-           no_data: bool, restore: bool, overwrite: bool) -> None:
+           no_data: bool, restore: bool, overwrite: bool, json_output_local: bool) -> None:
     """导出报告或备份"""
     workspace = ctx.obj["workspace"]
-    json_output = ctx.obj["json_output"]
+    json_output = _is_json_output(ctx, json_output_local)
 
     if restore:
         try:

@@ -105,6 +105,8 @@ def recommend_keep(
 
     result.keep = [s for s in scored_sensors if s.sensor_id in keep_ids]
     result.remove = [s for s in scored_sensors if s.sensor_id in remove_ids]
+    for item in result.remove:
+        item.action = "remove"
     result.keep_count = len(keep_ids)
     result.remove_count = len(remove_ids)
     result.total_maintenance_cost = sum(s.maintenance_cost for s in result.keep)
@@ -112,6 +114,8 @@ def recommend_keep(
     simulated = simulate_custom(db, config, remove_ids)
     if simulated.simulated_coverage:
         result.expected_coverage = simulated.simulated_coverage.overall_ratio
+    else:
+        result.expected_coverage = 0.0
 
     return result
 
@@ -314,18 +318,56 @@ def _get_neighbor_count(db: DatabaseManager, grid_id: str) -> int:
 
 
 def _select_by_count(sensors: list[RecommendationItem], count: int) -> list[RecommendationItem]:
-    """按数量选择"""
-    return sensors[: min(count, len(sensors))]
+    """按数量选择（贪心 + 变量多样性）"""
+    selected: list[RecommendationItem] = []
+    selected_vars: set[str] = set()
+    remaining = list(sensors)
+
+    while len(selected) < count and remaining:
+        best = None
+        best_score = -1.0
+        for s in remaining:
+            var_bonus = 0.3 if not any(v in selected_vars for v in s.variables) else 0.0
+            effective_score = s.score + var_bonus
+            if effective_score > best_score:
+                best_score = effective_score
+                best = s
+        if best is None:
+            break
+        selected.append(best)
+        for v in best.variables:
+            selected_vars.add(v)
+        remaining.remove(best)
+
+    return selected
 
 
 def _select_by_cost(sensors: list[RecommendationItem], max_cost: float) -> list[RecommendationItem]:
-    """按成本约束选择（贪心）"""
-    selected = []
+    """按成本约束选择（贪心 + 变量多样性）"""
+    selected: list[RecommendationItem] = []
     total_cost = 0.0
-    for sensor in sensors:
-        if total_cost + sensor.maintenance_cost <= max_cost:
-            selected.append(sensor)
-            total_cost += sensor.maintenance_cost
+    selected_vars: set[str] = set()
+    remaining = list(sensors)
+
+    while remaining:
+        best = None
+        best_score = -1.0
+        for s in remaining:
+            if total_cost + s.maintenance_cost > max_cost:
+                continue
+            var_bonus = 0.3 if not any(v in selected_vars for v in s.variables) else 0.0
+            effective_score = s.score + var_bonus
+            if effective_score > best_score:
+                best_score = effective_score
+                best = s
+        if best is None:
+            break
+        selected.append(best)
+        total_cost += best.maintenance_cost
+        for v in best.variables:
+            selected_vars.add(v)
+        remaining.remove(best)
+
     return selected
 
 

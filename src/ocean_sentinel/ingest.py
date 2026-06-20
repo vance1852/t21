@@ -79,41 +79,39 @@ def _ingest_csv(
     result = IngestResult()
     records = []
 
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            if reader.fieldnames is None:
-                raise IngestError("CSV文件缺少表头")
+    encodings_to_try = ["utf-8-sig", "utf-8", "gbk"]
+    last_error = None
+    reader = None
+    for enc in encodings_to_try:
+        try:
+            with open(path, "r", encoding=enc) as f:
+                reader = csv.DictReader(f)
+                if reader.fieldnames is None:
+                    raise IngestError("CSV文件缺少表头")
 
-            for row in reader:
-                result.total_records += 1
-                try:
-                    record = _parse_record(row, config)
-                    if record:
-                        records.append(record)
-                        result.sensor_ids.add(record["sensor_id"])
-                except Exception as e:
-                    result.error_records += 1
-                    if len(result.errors) < 20:
-                        result.errors.append(f"第{result.total_records}行: {str(e)}")
+                reader.fieldnames = [fn.lstrip("\ufeff").strip() for fn in reader.fieldnames]
 
-    except UnicodeDecodeError:
-        with open(path, "r", encoding="gbk") as f:
-            reader = csv.DictReader(f)
-            if reader.fieldnames is None:
-                raise IngestError("CSV文件缺少表头")
+                for row in reader:
+                    result.total_records += 1
+                    try:
+                        record = _parse_record(row, config)
+                        if record:
+                            records.append(record)
+                            result.sensor_ids.add(record["sensor_id"])
+                    except Exception as e:
+                        result.error_records += 1
+                        if len(result.errors) < 20:
+                            result.errors.append(f"第{result.total_records}行: {str(e)}")
+            break
+        except UnicodeDecodeError as e:
+            last_error = e
+            continue
 
-            for row in reader:
-                result.total_records += 1
-                try:
-                    record = _parse_record(row, config)
-                    if record:
-                        records.append(record)
-                        result.sensor_ids.add(record["sensor_id"])
-                except Exception as e:
-                    result.error_records += 1
-                    if len(result.errors) < 20:
-                        result.errors.append(f"第{result.total_records}行: {str(e)}")
+    if reader is None and last_error:
+        raise IngestError(f"无法识别文件编码，请确保文件使用UTF-8或GBK编码: {last_error}")
+
+    if not check_time_order(records):
+        result.errors.insert(0, "警告: 检测到时间倒序，已自动排序")
 
     _validate_sensors(records, db, result)
     _insert_records(records, db, config, result, source_file)
